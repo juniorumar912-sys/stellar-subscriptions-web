@@ -55,6 +55,22 @@ async function fetchAndCache(address: string, fetcher: Fetcher): Promise<TokenMe
   return promise;
 }
 
+/**
+ * Warm the token metadata cache ahead of navigation (e.g. on hover/focus of a
+ * plan card). Dedupes against any in-flight request and skips the network when
+ * fresh data is already cached, so no request is repeated.
+ */
+export function prefetchToken(address: string | undefined, fetcher: Fetcher): void {
+  if (!address) return;
+  const key = cacheKey(address);
+  if (inflight.has(key)) return;
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.timestamp <= STALE_TIME) return;
+  void fetchAndCache(address, fetcher).catch(() => {
+    // Prefetch failures are non-fatal; the hook will retry on mount.
+  });
+}
+
 export interface UseTokenResult {
   data: TokenMetadata | null;
   loading: boolean;

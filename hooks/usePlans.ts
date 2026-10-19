@@ -19,6 +19,9 @@ type PlanCacheEntry = {
 const PLAN_CACHE = new Map<string, PlanCacheEntry>();
 const PLAN_TTL_MS = 30_000;
 
+/** In-flight reads keyed by cache key so concurrent prefetch + mount dedupe. */
+const PLAN_INFLIGHT = new Map<string, Promise<unknown>>();
+
 function cacheKey(network: string, scope: string): string {
   return `${network}:${scope}`;
 }
@@ -33,9 +36,47 @@ function writeCache(key: string, data: unknown): void {
   PLAN_CACHE.set(key, { data, updatedAt: Date.now() });
 }
 
+/**
+ * Fetch a plan once and share the result with any concurrent caller.
+ * Repeated prefetches (hover + focus) reuse the in-flight promise or the
+ * fresh cache entry instead of issuing another request.
+ */
+function fetchPlanOnce(network: string, id: number): Promise<unknown> {
+  const key = cacheKey(network, `plan:${id}`);
+  const cached = readCache(key);
+  if (cached && !cached.stale) return Promise.resolve(cached.data);
+
+  const inflight = PLAN_INFLIGHT.get(key);
+  if (inflight) return inflight;
+
+  const request = getPlan(network, id)
+    .then((data) => {
+      writeCache(key, data);
+      return data;
+    })
+    .finally(() => {
+      PLAN_INFLIGHT.delete(key);
+    });
+
+  PLAN_INFLIGHT.set(key, request);
+  return request;
+}
+
 /** Drop cached plan reads; call after any plan write. */
 export function invalidatePlans(): void {
   PLAN_CACHE.clear();
+  PLAN_INFLIGHT.clear();
+}
+
+/**
+ * Warm the plan cache ahead of navigation (e.g. on card hover/focus).
+ * Safe to call repeatedly: fresh cache entries and in-flight requests are
+ * reused, so no request is repeated.
+ */
+export function prefetchPlan(network: string, id: number): void {
+  void fetchPlanOnce(network, id).catch(() => {
+    /* prefetch is best-effort; the detail page will retry on mount */
+  });
 }
 
 /** Every plan currently accepting subscribers. */
@@ -53,7 +94,7 @@ export function usePlans() {
 export function usePlan(id: number | null) {
   const { network } = useWallet();
   const key = id === null ? null : cacheKey(network, `plan:${id}`);
-  return useAsync(id === null ? null : () => getPlan(network, id), [network, id], {
+  return useAsync(id === null ? null : () => fetchPlanOnce(network, id), [network, id], {
     cacheKey: key,
     readCache,
     writeCache,
